@@ -41,6 +41,20 @@ extern YYSTYPE cool_yylval;
 
 unsigned int comment = 0;
 unsigned int string_buf_left;
+bool string_error;
+
+ int str_write(char *str, unsigned int len) {
+   if (len < string_buf_left) {
+     strncpy(string_buf_ptr, str, len);
+     string_buf_ptr += len;
+     string_buf_left -= len;
+     return 0;
+   } else {
+     string_error = true;
+     yylval.error_msg = "String constant too long";
+     return -1;
+   }
+ }
 
 /*
  *  Add Your own definitions here
@@ -73,14 +87,15 @@ NEW             [nN][eE][wW]
 OF              [oO][fF]
 NOT             [nN][oO][tT]
 TRUE            t[rR][uU][eE]
-OBJECTID        [a-z][_a-zA-Z]*
-TYPEID          [A-Z][_a-zA-Z]*
-NEWLINE         [\n\r\v\f]
-NOTNEWLINE      [^\n\r\v\f]
-NOTCOMMENT      [^\n\r\v\f"(*""*)"]
-NOTSTRING       [^\n\r\v\f\0\"]
-WHITESPACE      [ \t]+
+OBJECTID        [a-z][_a-zA-Z0-9]*
+TYPEID          [A-Z][_a-zA-Z0-9]*
+NEWLINE         [\n]
+NOTNEWLINE      [^\n]
+NOTCOMMENT      [^\n*(]|[*][^)]|[(][^*]
+NOTSTRING       [^\n\0\\\"]
+WHITESPACE      [ \t\r\f\v]+
 LE              <=
+ASSIGN          <-
 NULLCH          [\0]
 BACKSLASH       [\\]
 
@@ -90,8 +105,9 @@ END_COMMENT     "*)"
 
 QUOTES          \"
 
-%Start COMMENT
-%Start STRING
+%x COMMENT
+%x STRING
+%x EOF_PASSED
 
 %%
 
@@ -113,92 +129,124 @@ QUOTES          \"
     *  Integers
     *  Error
     */
-{NEWLINE}               { curr_lineno++; }
+<INITIAL,COMMENT>{NEWLINE}               { curr_lineno++; }
+<EOF_PASSED><<EOF>>              { return 0; }
 
-{START_COMMENT}                        { comment++; BEGIN(COMMENT); }
-<COMMENT><<EOF>>                       { yylval.error_msg = "EOF in comment"; return (ERROR); }
-<COMMENT>{NOTCOMMENT}*{START_COMMENT}  { comment++; }
-<COMMENT>{NOTCOMMENT}*{END_COMMENT}    { comment--; if (comment == 0) BEGIN(INITIAL); }
-<COMMENT>{NOTCOMMENT}*                 ;
+{START_COMMENT}  { comment++; BEGIN(COMMENT); }
+<COMMENT><<EOF>>                       { yylval.error_msg = "EOF in comment"; BEGIN(EOF_PASSED); return (ERROR); }
+<COMMENT>{NOTCOMMENT}*  ;
+<COMMENT>{BACKSLASH}(.|{NEWLINE}) ;
+<COMMENT>{START_COMMENT}  { comment++; }
+<COMMENT>{END_COMMENT}    { comment--; if (comment == 0) BEGIN(INITIAL); }
+
 <INITIAL>{END_COMMENT}                 { yylval.error_msg = "Unmatched *)"; return (ERROR); }
-{LINE_COMMENT}{NOTNEWLINE}*            ;
+<INITIAL>{LINE_COMMENT}{NOTNEWLINE}*   ;
 
-{QUOTES}                       { BEGIN(STRING); string_buf_ptr = string_buf; string_buf_left = MAX_STR_CONST; }
-<STRING><<EOF>>                { yylval.error_msg = "EOF in string constant"; return (ERROR); }
-<STRING>{NOTSTRING}*{NULLCH}   { yylval.error_msg = "String contains null character"; return (ERROR); }
-<STRING>{NOTSTRING}*{QUOTES}   { 
-                                    if (strlen(yytext) -1 < string_buf_left) {
-                                         strncpy(string_buf_ptr, yytext, strlen(yytext) - 1);
-                                         string_buf_ptr += strlen(yytext) - 1;
-                                         string_buf_left -= strlen(yytext) - 1;
-                                         yylval.symbol = stringtable.add_string(string_buf, string_buf_ptr - string_buf);
-                                         BEGIN(INITIAL);
-                                         return (STR_CONST);
-                                      } else {
-                                          yylval.error_msg = "String constant too long";
-                                          return (ERROR);
-                                      }
-                               }
-<STRING>{NOTSTRING}*           { 
-                                     if (strlen(yytext) < string_buf_left) {
-                                           strncpy(string_buf_ptr, yytext, strlen(yytext));
-                                          string_buf_ptr += strlen(yytext);
-                                           string_buf_left -= strlen(yytext);
-                                       } else {
-                                          yylval.error_msg = "String constant too long";
-                                          return (ERROR);
-                                       }
-                               }
+<INITIAL>{QUOTES}              { BEGIN(STRING); string_buf_ptr = string_buf; string_buf_left = MAX_STR_CONST; string_error = false; }
+<STRING><<EOF>>                { yylval.error_msg = "EOF in string constant"; BEGIN(EOF_PASSED); return ERROR; }
+<STRING>{NOTSTRING}* {
+    int rc = str_write(yytext, strlen(yytext));
+    if (rc != 0) {
+      return (ERROR);
+    }
+}
+<STRING>{NULLCH}   { yylval.error_msg = "String contains null character"; string_error = true; return (ERROR); }
+
+<STRING>{NEWLINE}  {
+  BEGIN(INITIAL);
+  curr_lineno++;
+  if (!string_error) {
+    yylval.error_msg = "Unterminated string constant";
+    return (ERROR);
+  }
+}
+<STRING>{BACKSLASH}(.|{NEWLINE}) {
+    char *c = &yytext[1];
+    int rc;
+    if (*c == '\n' || *c == '\r' || *c == '\v') {
+      curr_lineno++;
+    }
+
+  switch (*c) {
+    case 'n':
+      rc = str_write("\n", 1);
+      break;
+    case 'b':
+      rc = str_write("\b", 1);
+      break;
+    case 't':
+      rc = str_write("\t", 1);
+      break;
+    case 'f':
+      rc = str_write("\f", 1);
+      break;
+    case '\0':
+      yylval.error_msg = "String contains null character"; string_error = true; rc = -1;
+      break;
+    default:
+      rc = str_write(c, 1);
+  }
+  if (rc != 0) {
+    return (ERROR);
+  }
+		   }
+
+<STRING>{QUOTES} {
+  BEGIN(INITIAL);
+  if (!string_error) {
+    yylval.symbol = stringtable.add_string(string_buf, string_buf_ptr - string_buf);
+    return (STR_CONST);
+  }
+}
 
 {WHITESPACE}            ;
 
-{TRUE}                  { yylval.boolean = true; return (BOOL_CONST); }
-{FALSE}                 { yylval.boolean = false; return (BOOL_CONST); }
+<INITIAL>{TRUE}                  { yylval.boolean = true; return (BOOL_CONST); }
+<INITIAL>{FALSE}                 { yylval.boolean = false; return (BOOL_CONST); }
 
-{CLASS}                 { return (CLASS); }
-{ELSE}                  { return (ELSE); }
-{FI}                    { return (FI); }
-{IF}                    { return (IF); }
-{IN}                    { return (IN); }
-{INHERITS}              { return (INHERITS); }
-{ISVOID}                { return (ISVOID); }
-{LET}                   { return (LET); }
-{LOOP}                  { return (LOOP); }
-{POOL}                  { return (POOL); }
-{THEN}                  { return (THEN); }
-{WHILE}                 { return (WHILE); }
-{CASE}                  { return (CASE); }
-{ESAC}                  { return (ESAC); }
-{NEW}                   { return (NEW); }
-{OF}                    { return (OF); }
-{NOT}                   { return (NOT); }
-{DARROW}		{ return (DARROW); }
-{LE}                    { return (LE); }
+<INITIAL>{CLASS}                 { return (CLASS); }
+<INITIAL>{ELSE}                  { return (ELSE); }
+<INITIAL>{FI}                    { return (FI); }
+<INITIAL>{IF}                    { return (IF); }
+<INITIAL>{IN}                    { return (IN); }
+<INITIAL>{INHERITS}              { return (INHERITS); }
+<INITIAL>{ISVOID}                { return (ISVOID); }
+<INITIAL>{LET}                   { return (LET); }
+<INITIAL>{LOOP}                  { return (LOOP); }
+<INITIAL>{POOL}                  { return (POOL); }
+<INITIAL>{THEN}                  { return (THEN); }
+<INITIAL>{WHILE}                 { return (WHILE); }
+<INITIAL>{CASE}                  { return (CASE); }
+<INITIAL>{ESAC}                  { return (ESAC); }
+<INITIAL>{NEW}                   { return (NEW); }
+<INITIAL>{OF}                    { return (OF); }
+<INITIAL>{NOT}                   { return (NOT); }
+<INITIAL>{DARROW}		{ return (DARROW); }
+<INITIAL>{ASSIGN}               { return (ASSIGN); }
+<INITIAL>{LE}                    { return (LE); }
 
-{TYPEID}                { yylval.symbol = stringtable.add_string(yytext); return (TYPEID); }
-{OBJECTID}              { yylval.symbol = stringtable.add_string(yytext); return (OBJECTID); }
-{DIGIT}+                { yylval.symbol = stringtable.add_string(yytext); return (INT_CONST); }
+<INITIAL>{TYPEID}                { yylval.symbol = stringtable.add_string(yytext); return (TYPEID); }
+<INITIAL>{OBJECTID}              { yylval.symbol = stringtable.add_string(yytext); return (OBJECTID); }
+<INITIAL>{DIGIT}+                { yylval.symbol = stringtable.add_string(yytext); return (INT_CONST); }
 
-";"                     { return int(';'); }
-","                     { return int(','); }
-":"                     { return int(':'); }
-"{"                     { return int('{'); }
-"}"                     { return int('}'); }
-"+"                     { return int('+'); }
-"-"                     { return int('-'); }
-"*"                     { return int('*'); }
-"/"                     { return int('/'); }
-"["                     { return int('['); }
-"]"                     { return int(']'); }
-"<"                     { return int('<'); }
-">"                     { return int('>'); }
-"="                     { return int('='); }
-"~"                     { return int('~'); }
-"."                     { return int('.'); }
-"@"                     { return int('@'); }
-"("                     { return int('('); }
-")"                     { return int(')'); }
-.                       { return int(yytext[0]); }
+<INITIAL>";"                     { return int(';'); }
+<INITIAL>","                     { return int(','); }
+<INITIAL>":"                     { return int(':'); }
+<INITIAL>"{"                     { return int('{'); }
+<INITIAL>"}"                     { return int('}'); }
+<INITIAL>"+"                     { return int('+'); }
+<INITIAL>"-"                     { return int('-'); }
+<INITIAL>"*"                     { return int('*'); }
+<INITIAL>"/"                     { return int('/'); }
+<INITIAL>"<"                     { return int('<'); }
+<INITIAL>"="                     { return int('='); }
+<INITIAL>"~"                     { return int('~'); }
+<INITIAL>"."                     { return int('.'); }
+<INITIAL>"@"                     { return int('@'); }
+<INITIAL>"("                     { return int('('); }
+<INITIAL>")"                     { return int(')'); }
+
+<INITIAL>.                       { yylval.error_msg = yytext; return (ERROR); }
 
  /*
   * Keywords are case-insensitive except for the values true and false,
