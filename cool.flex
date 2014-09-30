@@ -39,6 +39,9 @@ extern int verbose_flag;
 
 extern YYSTYPE cool_yylval;
 
+unsigned int comment = 0;
+unsigned int string_buf_left;
+
 /*
  *  Add Your own definitions here
  */
@@ -49,7 +52,46 @@ extern YYSTYPE cool_yylval;
  * Define names for regular expressions here.
  */
 
+CLASS           [cC][lL][aA][sS][sS]
 DARROW          =>
+DIGIT           [0-9]
+ELSE            [eE][lL][sS][eE]
+FALSE           f[aA][lL][sS][eE]
+FI              [fF][iI]
+IF              [iI][fF]
+IN              [iI][nN]
+INHERITS        [iI][nN][hH][eE][rR][iI][tT][sS]
+ISVOID          [iI][sS][vV][oO][iI][dD]
+LET             [lL][eE][tT]
+LOOP            [lL][oO][oO][pP]
+POOL            [pP][oO][oO][lL]
+THEN            [tT][hH][eE][nN]
+WHILE           [wW][hH][iI][lL][eE]
+CASE            [cC][aA][sS][eE]
+ESAC            [eE][sS][aA][cC]
+NEW             [nN][eE][wW]
+OF              [oO][fF]
+NOT             [nN][oO][tT]
+TRUE            t[rR][uU][eE]
+OBJECTID        [a-z][_a-zA-Z]*
+TYPEID          [A-Z][_a-zA-Z]*
+NEWLINE         [\n\r\v\f]
+NOTNEWLINE      [^\n\r\v\f]
+NOTCOMMENT      [^\n\r\v\f"(*""*)"]
+NOTSTRING       [^\n\r\v\f\0\"]
+WHITESPACE      [ \t]+
+LE              <=
+NULLCH          [\0]
+BACKSLASH       [\\]
+
+LINE_COMMENT    "--"
+START_COMMENT   "(*"
+END_COMMENT     "*)"
+
+QUOTES          \"
+
+%Start COMMENT
+%Start STRING
 
 %%
 
@@ -61,7 +103,102 @@ DARROW          =>
  /*
   *  The multiple-character operators.
   */
+   /* Priorities:
+    *  New line
+    *  Comments
+    *  String
+    *  Whitespace
+    *  Keywords
+    *  Identifiers
+    *  Integers
+    *  Error
+    */
+{NEWLINE}               { curr_lineno++; }
+
+{START_COMMENT}                        { comment++; BEGIN(COMMENT); }
+<COMMENT><<EOF>>                       { yylval.error_msg = "EOF in comment"; return (ERROR); }
+<COMMENT>{NOTCOMMENT}*{START_COMMENT}  { comment++; }
+<COMMENT>{NOTCOMMENT}*{END_COMMENT}    { comment--; if (comment == 0) BEGIN(INITIAL); }
+<COMMENT>{NOTCOMMENT}*                 ;
+<INITIAL>{END_COMMENT}                 { yylval.error_msg = "Unmatched *)"; return (ERROR); }
+{LINE_COMMENT}{NOTNEWLINE}*            ;
+
+{QUOTES}                       { BEGIN(STRING); string_buf_ptr = string_buf; string_buf_left = MAX_STR_CONST; }
+<STRING><<EOF>>                { yylval.error_msg = "EOF in string constant"; return (ERROR); }
+<STRING>{NOTSTRING}*{NULLCH}   { yylval.error_msg = "String contains null character"; return (ERROR); }
+<STRING>{NOTSTRING}*{QUOTES}   { 
+                                    if (strlen(yytext) -1 < string_buf_left) {
+                                         strncpy(string_buf_ptr, yytext, strlen(yytext) - 1);
+                                         string_buf_ptr += strlen(yytext) - 1;
+                                         string_buf_left -= strlen(yytext) - 1;
+                                         yylval.symbol = stringtable.add_string(string_buf, string_buf_ptr - string_buf);
+                                         BEGIN(INITIAL);
+                                         return (STR_CONST);
+                                      } else {
+                                          yylval.error_msg = "String constant too long";
+                                          return (ERROR);
+                                      }
+                               }
+<STRING>{NOTSTRING}*           { 
+                                     if (strlen(yytext) < string_buf_left) {
+                                           strncpy(string_buf_ptr, yytext, strlen(yytext));
+                                          string_buf_ptr += strlen(yytext);
+                                           string_buf_left -= strlen(yytext);
+                                       } else {
+                                          yylval.error_msg = "String constant too long";
+                                          return (ERROR);
+                                       }
+                               }
+
+{WHITESPACE}            ;
+
+{TRUE}                  { yylval.boolean = true; return (BOOL_CONST); }
+{FALSE}                 { yylval.boolean = false; return (BOOL_CONST); }
+
+{CLASS}                 { return (CLASS); }
+{ELSE}                  { return (ELSE); }
+{FI}                    { return (FI); }
+{IF}                    { return (IF); }
+{IN}                    { return (IN); }
+{INHERITS}              { return (INHERITS); }
+{ISVOID}                { return (ISVOID); }
+{LET}                   { return (LET); }
+{LOOP}                  { return (LOOP); }
+{POOL}                  { return (POOL); }
+{THEN}                  { return (THEN); }
+{WHILE}                 { return (WHILE); }
+{CASE}                  { return (CASE); }
+{ESAC}                  { return (ESAC); }
+{NEW}                   { return (NEW); }
+{OF}                    { return (OF); }
+{NOT}                   { return (NOT); }
 {DARROW}		{ return (DARROW); }
+{LE}                    { return (LE); }
+
+{TYPEID}                { yylval.symbol = stringtable.add_string(yytext); return (TYPEID); }
+{OBJECTID}              { yylval.symbol = stringtable.add_string(yytext); return (OBJECTID); }
+{DIGIT}+                { yylval.symbol = stringtable.add_string(yytext); return (INT_CONST); }
+
+";"                     { return int(';'); }
+","                     { return int(','); }
+":"                     { return int(':'); }
+"{"                     { return int('{'); }
+"}"                     { return int('}'); }
+"+"                     { return int('+'); }
+"-"                     { return int('-'); }
+"*"                     { return int('*'); }
+"/"                     { return int('/'); }
+"["                     { return int('['); }
+"]"                     { return int(']'); }
+"<"                     { return int('<'); }
+">"                     { return int('>'); }
+"="                     { return int('='); }
+"~"                     { return int('~'); }
+"."                     { return int('.'); }
+"@"                     { return int('@'); }
+"("                     { return int('('); }
+")"                     { return int(')'); }
+.                       { return int(yytext[0]); }
 
  /*
   * Keywords are case-insensitive except for the values true and false,
@@ -71,7 +208,7 @@ DARROW          =>
 
  /*
   *  String constants (C syntax)
-  *  Escape sequence \c is accepted for all characters c. Except for 
+  *  Escape sequence \c is accepted for all characters c. Except for
   *  \n \t \b \f, the result is c.
   *
   */
