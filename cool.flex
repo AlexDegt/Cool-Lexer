@@ -43,18 +43,32 @@ unsigned int comment = 0;
 unsigned int string_buf_left;
 bool string_error;
 
- int str_write(char *str, unsigned int len) {
-   if (len < string_buf_left) {
-     strncpy(string_buf_ptr, str, len);
-     string_buf_ptr += len;
-     string_buf_left -= len;
-     return 0;
-   } else {
-     string_error = true;
-     yylval.error_msg = "String constant too long";
-     return -1;
-   }
- }
+int str_write(char *str, unsigned int len) {
+  if (len < string_buf_left) {
+    strncpy(string_buf_ptr, str, len);
+    string_buf_ptr += len;
+    string_buf_left -= len;
+    return 0;
+  } else {
+    string_error = true;
+    yylval.error_msg = "String constant too long";
+    return -1;
+  }
+}
+
+int null_character_err() {
+  yylval.error_msg = "String contains null character";
+  string_error = true;
+  return -1;
+}
+
+char * backslash_common() {
+  char *c = &yytext[1];
+  if (*c == '\n') {
+    curr_lineno++;
+  }
+  return c;
+}
 
 /*
  *  Add Your own definitions here
@@ -91,13 +105,19 @@ OBJECTID        [a-z][_a-zA-Z0-9]*
 TYPEID          [A-Z][_a-zA-Z0-9]*
 NEWLINE         [\n]
 NOTNEWLINE      [^\n]
-NOTCOMMENT      [^\n*(]|[*][^)]|[(][^*]
+NOTCOMMENT      [^\n*(\\]
 NOTSTRING       [^\n\0\\\"]
 WHITESPACE      [ \t\r\f\v]+
 LE              <=
 ASSIGN          <-
 NULLCH          [\0]
 BACKSLASH       [\\]
+STAR            [*]
+NOTSTAR         [^*]
+LEFTPAREN       [(]
+NOTLEFTPAREN    [^(]
+RIGHTPAREN      [)]
+NOTRIGHTPAREN   [^)]
 
 LINE_COMMENT    "--"
 START_COMMENT   "(*"
@@ -107,7 +127,6 @@ QUOTES          \"
 
 %x COMMENT
 %x STRING
-%x EOF_PASSED
 
 %%
 
@@ -129,30 +148,73 @@ QUOTES          \"
     *  Integers
     *  Error
     */
-<INITIAL,COMMENT>{NEWLINE}               { curr_lineno++; }
-<EOF_PASSED><<EOF>>              { return 0; }
-
-{START_COMMENT}  { comment++; BEGIN(COMMENT); }
-<COMMENT><<EOF>>                       { yylval.error_msg = "EOF in comment"; BEGIN(EOF_PASSED); return (ERROR); }
-<COMMENT>{NOTCOMMENT}*  ;
-<COMMENT>{BACKSLASH}(.|{NEWLINE}) ;
-<COMMENT>{START_COMMENT}  { comment++; }
-<COMMENT>{END_COMMENT}    { comment--; if (comment == 0) BEGIN(INITIAL); }
-
-<INITIAL>{END_COMMENT}                 { yylval.error_msg = "Unmatched *)"; return (ERROR); }
-<INITIAL>{LINE_COMMENT}{NOTNEWLINE}*   ;
-
-<INITIAL>{QUOTES}              { BEGIN(STRING); string_buf_ptr = string_buf; string_buf_left = MAX_STR_CONST; string_error = false; }
-<STRING><<EOF>>                { yylval.error_msg = "EOF in string constant"; BEGIN(EOF_PASSED); return ERROR; }
-<STRING>{NOTSTRING}* {
-    int rc = str_write(yytext, strlen(yytext));
-    if (rc != 0) {
-      return (ERROR);
-    }
+<INITIAL,COMMENT>{NEWLINE} {
+    curr_lineno++;
 }
-<STRING>{NULLCH}   { yylval.error_msg = "String contains null character"; string_error = true; return (ERROR); }
 
-<STRING>{NEWLINE}  {
+{START_COMMENT} {
+  comment++;
+  BEGIN(COMMENT);
+}
+
+<COMMENT><<EOF>> {
+  yylval.error_msg = "EOF in comment";
+  BEGIN(INITIAL);
+  return (ERROR);
+}
+
+<COMMENT>{STAR}/{NOTRIGHTPAREN}    ;
+<COMMENT>{LEFTPAREN}/{NOTSTAR}     ;
+<COMMENT>{NOTCOMMENT}*             ;
+
+<COMMENT>{BACKSLASH}(.|{NEWLINE}) {
+  backslash_common();
+};
+<COMMENT>{BACKSLASH}               ;
+
+<COMMENT>{START_COMMENT} {
+  comment++;
+}
+
+<COMMENT>{END_COMMENT} {
+  comment--;
+  if (comment == 0) {
+    BEGIN(INITIAL);
+  }
+}
+
+<INITIAL>{END_COMMENT} {
+  yylval.error_msg = "Unmatched *)";
+  return (ERROR);
+}
+
+<INITIAL>{LINE_COMMENT}{NOTNEWLINE}*  ;
+
+<INITIAL>{QUOTES} {
+  BEGIN(STRING);
+  string_buf_ptr = string_buf;
+  string_buf_left = MAX_STR_CONST;
+  string_error = false;
+}
+
+<STRING><<EOF>> {
+  yylval.error_msg = "EOF in string constant";
+  BEGIN(INITIAL);
+  return ERROR;
+}
+
+<STRING>{NOTSTRING}* {
+  int rc = str_write(yytext, strlen(yytext));
+  if (rc != 0) {
+    return (ERROR);
+  }
+}
+<STRING>{NULLCH} {
+  null_character_err();
+  return (ERROR);
+}
+
+<STRING>{NEWLINE} {
   BEGIN(INITIAL);
   curr_lineno++;
   if (!string_error) {
@@ -161,11 +223,8 @@ QUOTES          \"
   }
 }
 <STRING>{BACKSLASH}(.|{NEWLINE}) {
-    char *c = &yytext[1];
-    int rc;
-    if (*c == '\n' || *c == '\r' || *c == '\v') {
-      curr_lineno++;
-    }
+  char *c = backslash_common();
+  int rc;
 
   switch (*c) {
     case 'n':
@@ -181,7 +240,7 @@ QUOTES          \"
       rc = str_write("\f", 1);
       break;
     case '\0':
-      yylval.error_msg = "String contains null character"; string_error = true; rc = -1;
+      rc = null_character_err();
       break;
     default:
       rc = str_write(c, 1);
@@ -189,7 +248,8 @@ QUOTES          \"
   if (rc != 0) {
     return (ERROR);
   }
-		   }
+}
+<STRING>{BACKSLASH}             ;
 
 <STRING>{QUOTES} {
   BEGIN(INITIAL);
@@ -199,7 +259,7 @@ QUOTES          \"
   }
 }
 
-{WHITESPACE}            ;
+{WHITESPACE}                     ;
 
 <INITIAL>{TRUE}                  { yylval.boolean = true; return (BOOL_CONST); }
 <INITIAL>{FALSE}                 { yylval.boolean = false; return (BOOL_CONST); }
@@ -221,8 +281,8 @@ QUOTES          \"
 <INITIAL>{NEW}                   { return (NEW); }
 <INITIAL>{OF}                    { return (OF); }
 <INITIAL>{NOT}                   { return (NOT); }
-<INITIAL>{DARROW}		{ return (DARROW); }
-<INITIAL>{ASSIGN}               { return (ASSIGN); }
+<INITIAL>{DARROW}		 { return (DARROW); }
+<INITIAL>{ASSIGN}                { return (ASSIGN); }
 <INITIAL>{LE}                    { return (LE); }
 
 <INITIAL>{TYPEID}                { yylval.symbol = stringtable.add_string(yytext); return (TYPEID); }
